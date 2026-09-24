@@ -15,7 +15,17 @@ export function parseNetstat(stdout, port) {
     const parts = raw.trim().split(/\s+/);
     if (parts.length < 5) continue;
     if (parts[0].toUpperCase() !== 'TCP') continue;
-    if (!/LISTEN/i.test(parts[3])) continue; // only the listening socket holds the port
+    // Only the LISTENING socket holds the port. Detect it via the *foreign*
+    // address being the wildcard ":0" (e.g. 0.0.0.0:0 or [::]:0), which is the
+    // sole TCP state with a zero foreign port. This is locale-independent:
+    // netstat translates the "LISTENING" text on non-English Windows (e.g.
+    // "ABHÖREN", "À L'ÉCOUTE", "ESCUCHAR"), and a translated — possibly
+    // multi-word — state would otherwise be missed. The English /LISTEN/i
+    // check is kept as a fast path / belt-and-suspenders.
+    const foreign = parts[2];
+    const fColon = foreign.lastIndexOf(':');
+    const foreignIsWildcard = fColon !== -1 && foreign.slice(fColon + 1) === '0';
+    if (!foreignIsWildcard && !/LISTEN/i.test(parts[3])) continue;
     const local = parts[1];
     const colon = local.lastIndexOf(':');
     if (colon === -1) continue;

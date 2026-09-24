@@ -32,6 +32,38 @@ test('parseNetstat: empty when no match', () => {
   assert.deepEqual(parseNetstat(NETSTAT, 9999), []);
 });
 
+// Regression: netstat localizes the STATE column on non-English Windows, so the
+// tool must not rely on the literal "LISTENING" text. Listeners are detected by
+// their wildcard foreign address (:0) instead.
+const NETSTAT_DE = `
+Aktive Verbindungen
+
+  Proto  Lokale Adresse         Remoteadresse          Status          PID
+  TCP    0.0.0.0:3000           0.0.0.0:0              ABHÖREN         48213
+  TCP    [::]:3000              [::]:0                 ABHÖREN         48213
+  TCP    127.0.0.1:3000         127.0.0.1:54321        HERGESTELLT     4444
+`;
+
+test('parseNetstat: finds listeners on a German (non-English) locale', () => {
+  // Old English-only logic returned [] here; the ESTABLISHED row (pid 4444)
+  // must still be excluded.
+  assert.deepEqual(parseNetstat(NETSTAT_DE, 3000), [48213]);
+});
+
+// French state text has a space ("À L'ÉCOUTE"), which shifts the column count;
+// keying off the foreign address (parts[2]) and the last column for the PID
+// keeps this robust.
+const NETSTAT_FR = `
+Connexions actives
+
+  Proto  Adresse locale         Adresse distante       État            PID
+  TCP    0.0.0.0:8080           0.0.0.0:0              À L'ÉCOUTE      1234
+`;
+
+test('parseNetstat: tolerates a multi-word localized state (French)', () => {
+  assert.deepEqual(parseNetstat(NETSTAT_FR, 8080), [1234]);
+});
+
 test('parseLsofPids: one pid per line, deduped', () => {
   assert.deepEqual(parseLsofPids('48213\n48213\n777\n'), [48213, 777]);
 });
