@@ -1,0 +1,106 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  parseNetstat,
+  parseLsofPids,
+  parseFuser,
+  parsePsOutput,
+  parseTasklistName,
+  findProcessesOnPort,
+} from '../src/find.mjs';
+
+const NETSTAT = `
+Active Connections
+
+  Proto  Local Address          Foreign Address        State           PID
+  TCP    0.0.0.0:3000           0.0.0.0:0              LISTENING       48213
+  TCP    [::]:3000              [::]:0                 LISTENING       48213
+  TCP    127.0.0.1:3000         127.0.0.1:54321        ESTABLISHED     48213
+  TCP    0.0.0.0:13000          0.0.0.0:0              LISTENING       999
+  TCP    0.0.0.0:8080           0.0.0.0:0              LISTENING       777
+`;
+
+test('parseNetstat: only LISTENING PIDs for the exact port, deduped', () => {
+  assert.deepEqual(parseNetstat(NETSTAT, 3000), [48213]);
+});
+
+test('parseNetstat: does not confuse 3000 with 13000', () => {
+  assert.deepEqual(parseNetstat(NETSTAT, 13000), [999]);
+});
+
+test('parseNetstat: empty when no match', () => {
+  assert.deepEqual(parseNetstat(NETSTAT, 9999), []);
+});
+
+test('parseLsofPids: one pid per line, deduped', () => {
+  assert.deepEqual(parseLsofPids('48213\n48213\n777\n'), [48213, 777]);
+});
+
+test('parseLsofPids: empty input', () => {
+  assert.deepEqual(parseLsofPids(''), []);
+});
+
+test('parseFuser: extracts pids and drops the port', () => {
+  assert.deepEqual(parseFuser('3000/tcp:            48213 48990\n', 3000), [48213, 48990]);
+});
+
+test('parsePsOutput: splits name from the full command line', () => {
+  assert.deepEqual(
+    parsePsOutput('node node /srv/app.js --port 3000'),
+    { name: 'node', cmd: 'node /srv/app.js --port 3000' },
+  );
+});
+
+test('parsePsOutput: empty input', () => {
+  assert.deepEqual(parsePsOutput('   '), { name: '', cmd: '' });
+});
+
+test('parseTasklistName: reads the CSV image name', () => {
+  assert.equal(parseTasklistName('"node.exe","48213","Console","1","52,340 K"'), 'node.exe');
+});
+
+test('parseTasklistName: no matching task -> empty', () => {
+  assert.equal(
+    parseTasklistName('INFO: No tasks are running which match the specified criteria.'),
+    '',
+  );
+});
+
+test('findProcessesOnPort: windows path (injected run)', async () => {
+  const run = async (cmd) => {
+    if (cmd === 'netstat') return { code: 0, stdout: NETSTAT, stderr: '' };
+    if (cmd === 'tasklist') return { code: 0, stdout: '"node.exe","48213","Console","1","10 K"', stderr: '' };
+    return { code: 1, stdout: '', stderr: '' };
+  };
+  const res = await findProcessesOnPort(3000, { platform: 'win32', run });
+  assert.deepEqual(res, [{ pid: 48213, name: 'node.exe', cmd: '' }]);
+});
+
+test('findProcessesOnPort: posix path via lsof (injected run)', async () => {
+  const run = async (cmd) => {
+    if (cmd === 'lsof') return { code: 0, stdout: '48213\n', stderr: '' };
+    if (cmd === 'ps') return { code: 0, stdout: 'node node /srv/app.js', stderr: '' };
+    return { code: 1, stdout: '', stderr: '' };
+  };
+  const res = await findProcessesOnPort(3000, { platform: 'linux', run });
+  assert.deepEqual(res, [{ pid: 48213, name: 'node', cmd: 'node /srv/app.js' }]);
+});
+
+test('findProcessesOnPort: falls back to fuser when lsof is missing', async () => {
+  const run = async (cmd) => {
+    if (cmd === 'lsof') {
+      return { code: -1, stdout: '', stderr: '', error: Object.assign(new Error('spawn lsof ENOENT'), { code: 'ENOENT' }) };
+    }
+    if (cmd === 'fuser') return { code: 0, stdout: '3000/tcp: 48213', stderr: '' };
+    if (cmd === 'ps') return { code: 0, stdout: 'node node /srv/app.js', stderr: '' };
+    return { code: 1, stdout: '', stderr: '' };
+  };
+  const res = await findProcessesOnPort(3000, { platform: 'linux', run });
+  assert.deepEqual(res, [{ pid: 48213, name: 'node', cmd: 'node /srv/app.js' }]);
+});
+
+test('findProcessesOnPort: empty when nothing is listening', async () => {
+  const run = async () => ({ code: 1, stdout: '', stderr: '' });
+  const res = await findProcessesOnPort(3000, { platform: 'linux', run });
+  assert.deepEqual(res, []);
+});

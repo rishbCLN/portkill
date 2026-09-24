@@ -1,0 +1,41 @@
+{
+  "name": "portkill",
+  "version": "0.1.0",
+  "description": "Find and kill whatever process is hogging a port — on Windows, macOS, and Linux, in one command.",
+  "type": "module",
+  "bin": {
+    "portkill": "bin/portkill.mjs"
+  },
+  "scripts": {
+    "test": "node --test",
+    "start": "node bin/portkill.mjs"
+  },
+  "keywords": [
+    "port",
+    "kill",
+    "kill-port",
+    "eaddrinuse",
+    "netstat",
+    "lsof",
+    "cli",
+    "developer-tools",
+    "cross-platform",
+    "zero-dependency"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin",
+    "src"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YOUR_USERNAME/portkill.git"
+  },
+  "bugs": {
+    "url": "https://github.com/YOUR_USERNAME/portkill/issues"
+  },
+  "homepage": "https://github.com/YOUR_USERNAME/portkill#readme"
+}
