@@ -99,7 +99,13 @@ export async function findProcessesOnPort(port, opts = {}) {
   const run = opts.run || defaultRun;
 
   if (platform === 'win32') {
-    const { stdout } = await run('netstat', ['-ano', '-p', 'tcp']);
+    // NOTE: `-p tcp` restricts netstat to IPv4 only, silently dropping every
+    // IPv6 listener (rows like `[::]:3000`). Since many servers (Node's default
+    // dual-stack listen, Vite, etc.) bind on `::`, that would make portkill
+    // report the port as free. Plain `netstat -ano` still labels IPv6 rows as
+    // proto "TCP", so parseNetstat handles both families; we just must not
+    // filter the family away here.
+    const { stdout } = await run('netstat', ['-ano']);
     const pids = parseNetstat(stdout, port);
     const out = [];
     for (const pid of pids) {

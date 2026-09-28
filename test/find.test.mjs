@@ -136,3 +136,34 @@ test('findProcessesOnPort: empty when nothing is listening', async () => {
   const res = await findProcessesOnPort(3000, { platform: 'linux', run });
   assert.deepEqual(res, []);
 });
+
+// Regression: `netstat -ano -p tcp` is IPv4-only on Windows and silently drops
+// IPv6 listeners ([::]:port), which is exactly how Node's default dual-stack
+// listen / Vite / many dev servers bind. That made portkill report a busy port
+// as free. findProcessesOnPort must invoke netstat WITHOUT a family filter and
+// still discover an IPv6-only listener.
+const NETSTAT_V6_ONLY = `
+Active Connections
+
+  Proto  Local Address          Foreign Address        State           PID
+  TCP    [::]:3000              [::]:0                 LISTENING       55123
+`;
+
+test('findProcessesOnPort: does not filter to IPv4 (finds IPv6 listeners)', async () => {
+  let netstatArgs = null;
+  const run = async (cmd, args) => {
+    if (cmd === 'netstat') {
+      netstatArgs = args;
+      // Emulate Windows: with `-p tcp` the IPv6 row would be absent. Only
+      // return the listener when the family filter is NOT present.
+      const filtered = args.includes('-p') && args.includes('tcp');
+      return { code: 0, stdout: filtered ? '' : NETSTAT_V6_ONLY, stderr: '' };
+    }
+    if (cmd === 'tasklist') return { code: 0, stdout: '"node.exe","55123","Console","1","10 K"', stderr: '' };
+    return { code: 1, stdout: '', stderr: '' };
+  };
+  const res = await findProcessesOnPort(3000, { platform: 'win32', run });
+  assert.ok(!(netstatArgs.includes('-p') && netstatArgs.includes('tcp')),
+    'netstat must not be restricted to a single family');
+  assert.deepEqual(res, [{ pid: 55123, name: 'node.exe', cmd: '' }]);
+});
