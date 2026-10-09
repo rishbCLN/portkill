@@ -2,6 +2,7 @@
 // taskkill on Windows. Side effects (signals / spawning) are injectable so the
 // escalation logic can be unit-tested without touching real processes.
 import { run as defaultRun } from './run.mjs';
+import { TIMEOUT_MS } from './run.mjs';
 
 /**
  * Never let the tool kill a system-critical process.
@@ -47,7 +48,7 @@ export async function killProcess(pid, opts = {}) {
 
   if (platform === 'win32') {
     // /T also terminates child processes; /F forces it.
-    const { code, stdout, stderr, error } = await run('taskkill', ['/PID', String(pid), '/F', '/T']);
+    const { code, stdout, stderr, error } = await run('taskkill', ['/PID', String(pid), '/F', '/T'], { timeout: TIMEOUT_MS });
     if (code === 0) return { pid, ok: true };
     // A process that is already gone is success, not failure. When one process
     // listens on several requested ports it is targeted once per port; the

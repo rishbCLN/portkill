@@ -8,8 +8,12 @@ to keep it that way: fast, obvious, and cross-platform.
 - **No runtime dependencies.** Everything uses Node built-ins (`child_process`,
   `readline`, etc.). PRs that add a dependency will be asked to remove it.
 - **Parsing is pure.** OS command output is parsed by small pure functions
-  (`parseNetstat`, `parseLsofPids`, `parsePsOutput`, …). Side effects (spawning,
-  signalling) are injectable so everything is testable without real processes.
+  (`parseNetstat`, `parseLsofPids`, `parseLsofFull`, `parseFuser`, `parseSs`,
+  `parsePsOutput`, …). Side effects (spawning, signalling) are injectable so
+  everything is testable without real processes. The CLI orchestration
+  (`src/cli.mjs`) likewise takes injectable dependencies and is tested in
+  `test/cli.test.mjs`; `src/ui.mjs` and `src/run.mjs` are covered by
+  `test/ui.test.mjs` and `test/run.test.mjs`.
 - **Safe by default.** Anything that kills must be gated behind confirmation or
   `--force`, and must never target protected PIDs.
 

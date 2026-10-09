@@ -5,6 +5,7 @@ import {
   parseLsofPids,
   parseFuser,
   parseSs,
+  parseLsofFull,
   parsePsOutput,
   parseTasklistName,
   findProcessesOnPort,
@@ -252,4 +253,92 @@ Active Connections
     { port: 3000, pid: 48213, name: 'node.exe', cmd: '' },
     { port: 3001, pid: 48213, name: 'node.exe', cmd: '' },
   ]);
+});
+
+// lsof -F field output: `p<pid>` applies to each following `n<addr>:<port>`.
+const LSOF_FULL = `p48213
+nlocalhost:3000
+n*:3000
+p777
+n127.0.0.1:8080
+p55123
+n[::1]:9229`;
+
+test('parseLsofFull: pairs each pid with its listening port(s), deduped', () => {
+  assert.deepEqual(parseLsofFull(LSOF_FULL), [
+    { pid: 48213, port: 3000 },
+    { pid: 777, port: 8080 },
+    { pid: 55123, port: 9229 },
+  ]);
+});
+
+test('parseLsofFull: empty input', () => {
+  assert.deepEqual(parseLsofFull(''), []);
+});
+
+// Regression: a POSIX range used to spawn one lsof per port. The batched scan
+// must issue a single `lsof ... -FpnP` and filter to the requested ports.
+test('findProcessesOnPorts: posix batches a single lsof -F scan', async () => {
+  let lsofCalls = 0;
+  let lsofArgs = null;
+  const run = async (cmd, args) => {
+    if (cmd === 'lsof') {
+      lsofCalls += 1;
+      lsofArgs = args;
+      return { code: 0, stdout: LSOF_FULL, stderr: '' };
+    }
+    if (cmd === 'ps') {
+      return { code: 0, stdout: `proc proc for pid`, stderr: '' };
+    }
+    return { code: 1, stdout: '', stderr: '' };
+  };
+  const res = await findProcessesOnPorts([3000, 8080], { platform: 'linux', run });
+  assert.equal(lsofCalls, 1, 'lsof must be invoked exactly once for the batch');
+  assert.ok(lsofArgs.includes('-FpnP'), 'batched lsof must use -F field output');
+  assert.deepEqual(res, [
+    { port: 3000, pid: 48213, name: 'proc', cmd: 'proc for pid' },
+    { port: 8080, pid: 777, name: 'proc', cmd: 'proc for pid' },
+  ]);
+});
+
+// When lsof is absent the batched path must fall back to the per-port probes
+// (which can still find listeners via fuser / ss).
+test('findProcessesOnPorts: posix falls back to per-port probes when lsof is missing', async () => {
+  const enoent = (name) => ({
+    code: -1, stdout: '', stderr: '',
+    error: Object.assign(new Error(`spawn ${name} ENOENT`), { code: 'ENOENT' }),
+  });
+  const run = async (cmd, args) => {
+    if (cmd === 'lsof') return enoent('lsof');
+    if (cmd === 'fuser') return { code: 0, stdout: `${args[0]}: 48213`, stderr: '' };
+    if (cmd === 'ps') return { code: 0, stdout: 'node node app.js', stderr: '' };
+    return { code: 1, stdout: '', stderr: '' };
+  };
+  const res = await findProcessesOnPorts([3000], { platform: 'linux', run });
+  assert.deepEqual(res, [{ port: 3000, pid: 48213, name: 'node', cmd: 'node app.js' }]);
+});
+
+// A hard failure (no scanning tool at all) must surface as a thrown ENOTOOL
+// error, so the CLI can exit non-zero instead of reporting the port free.
+test('findProcessesOnPort: throws ENOTOOL when lsof, fuser and ss are all missing', async () => {
+  const enoent = (name) => ({
+    code: -1, stdout: '', stderr: '',
+    error: Object.assign(new Error(`spawn ${name} ENOENT`), { code: 'ENOENT' }),
+  });
+  const run = async (cmd) => enoent(cmd);
+  await assert.rejects(
+    () => findProcessesOnPort(3000, { platform: 'linux', run }),
+    (e) => e.code === 'ENOTOOL',
+  );
+});
+
+test('findProcessesOnPort: throws ENOTOOL when netstat is missing on Windows', async () => {
+  const run = async (cmd) => ({
+    code: -1, stdout: '', stderr: '',
+    error: Object.assign(new Error(`spawn ${cmd} ENOENT`), { code: 'ENOENT' }),
+  });
+  await assert.rejects(
+    () => findProcessesOnPort(3000, { platform: 'win32', run }),
+    (e) => e.code === 'ENOTOOL',
+  );
 });

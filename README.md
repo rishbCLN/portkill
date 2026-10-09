@@ -64,7 +64,33 @@ portkill 3000-3010           # a whole range
 curl ... ; portkill 5432 -l  # peek at what's on the DB port
 ```
 
-Exit codes: `0` success (or nothing to kill), `1` one or more kills failed, `2` bad usage.
+Exit codes: `0` success (or nothing to kill), `1` one or more kills failed (or a
+port scan failed, e.g. no scanning tool installed), `2` bad usage.
+
+### JSON output
+
+`--json` prints a single object (never partial/streamed):
+
+```json
+{
+  "success": true,
+  "ports": [3000],
+  "found":   [{ "port": 3000, "pid": 48213, "name": "node", "cmd": "node app.js" }],
+  "killed":  [{ "port": 3000, "pid": 48213, "name": "node", "cmd": "node app.js", "killed": true, "error": null }],
+  "skipped": [{ "port": 3000, "pid": 1, "name": "init", "cmd": "" }]
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `success` | `true` unless a kill failed or the scan errored |
+| `ports` | the ports you requested |
+| `found` | every listener discovered across those ports |
+| `killed` | per-process kill results — **empty** for `--list`, and for `--json` without `--force` (read-only) |
+| `skipped` | protected processes that were not killed |
+
+Note: the `cmd` field is empty on Windows — `tasklist` exposes the process image
+name only, not its full command line.
 
 ## Safety
 
@@ -84,11 +110,15 @@ No magic — portkill just runs the tools your OS already ships and parses the o
 
 | OS | Find | Kill |
 | --- | --- | --- |
-| Windows | `netstat -ano -p tcp` + `tasklist` | `taskkill /PID <pid> /F /T` |
-| macOS / Linux | `lsof -nP -iTCP:<port> -sTCP:LISTEN -t` (falls back to `fuser`) + `ps` | `SIGTERM`, then `SIGKILL` if it won't exit |
+| Windows | `netstat -ano` (both IPv4 and IPv6 listeners) + `tasklist` | `taskkill /PID <pid> /F /T` |
+| macOS / Linux | `lsof -nP -iTCP -sTCP:LISTEN` (falls back to `fuser`, then `ss`) + `ps` | `SIGTERM`, then `SIGKILL` if it won't exit |
 
-On POSIX it asks the process to stop first (`SIGTERM`) and only escalates to
-`SIGKILL` if it's still alive after a moment.
+On Windows, portkill runs `netstat -ano` *without* a `-p tcp` family filter so
+that IPv6-only listeners (e.g. Node's default dual-stack `::` bind, Vite) are
+not silently missed. On POSIX it prefers `lsof` (a single batched scan covers a
+whole range), falling back to `fuser` and then iproute2's `ss` on minimal images
+that don't ship `lsof`. It asks the process to stop first (`SIGTERM`) and only
+escalates to `SIGKILL` if it's still alive after a moment.
 
 ## Development
 
@@ -99,7 +129,9 @@ node bin/portkill.mjs --help
 
 The OS-specific text parsing lives in small pure functions (`src/find.mjs`,
 `src/args.mjs`, `src/kill.mjs`) that are unit-tested against captured real output,
-so contributions are easy to verify.
+so contributions are easy to verify. The CLI orchestration (`src/cli.mjs`) takes
+injectable dependencies, so it is tested end-to-end without touching real
+processes.
 
 ## Contributing
 

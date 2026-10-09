@@ -4,6 +4,13 @@
 import { spawn } from 'node:child_process';
 
 /**
+ * Default per-command wall-clock timeout (ms). Guards against a scanning or
+ * kill command hanging forever (e.g. a wedged netstat/lsof) and taking the
+ * whole CLI down with it. Tunable in one place.
+ */
+export const TIMEOUT_MS = 5000;
+
+/**
  * Run a command, resolving with its captured output.
  * @param {string} cmd
  * @param {string[]} [args]

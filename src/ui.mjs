@@ -48,13 +48,20 @@ function truncate(s, n) {
  */
 export function formatTable(rows, c) {
   if (!rows || rows.length === 0) return '';
-  const header = ['PORT', 'PID', 'PROCESS', 'COMMAND'];
-  const data = rows.map((r) => [
+  let header = ['PORT', 'PID', 'PROCESS', 'COMMAND'];
+  let data = rows.map((r) => [
     String(r.port),
     String(r.pid),
     r.name || 'unknown',
     truncate(r.cmd || '', 60),
   ]);
+  // Drop trailing columns that are empty for every row (e.g. COMMAND on
+  // Windows, where tasklist only exposes the image name — showing a blank
+  // header would just be noise).
+  while (header.length > 1 && data.every((d) => d[d.length - 1] === '')) {
+    header = header.slice(0, -1);
+    data = data.map((d) => d.slice(0, -1));
+  }
   const widths = header.map((h, i) => Math.max(h.length, ...data.map((d) => d[i].length)));
   const renderRow = (cells) => cells.map((cell, i) => cell.padEnd(widths[i])).join('  ').trimEnd();
 

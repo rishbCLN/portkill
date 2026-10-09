@@ -76,9 +76,9 @@ Kill it? [y/N] y
 ```
 
 ## 6. How to find the process (per OS)
-- **Windows:** `netstat -ano -p tcp` → parse the line with `:<port>` in LISTENING state → last column is PID. Resolve name via `tasklist /FI "PID eq <pid>" /FO CSV /NH`. Kill via `taskkill /PID <pid> /F`.
-- **macOS/Linux:** prefer `lsof -nP -iTCP:<port> -sTCP:LISTEN -t` for PIDs; get details from `ps -p <pid> -o comm=,args=`. Kill via `process.kill(pid, 'SIGTERM')`, escalate to `SIGKILL` after a short timeout. Fallback to `fuser` if `lsof` is missing.
-- Wrap all spawns with a helper that returns `{stdout, code}` and never throws on non-zero.
+- **Windows:** `netstat -ano` (no `-p tcp` family filter, so IPv6 listeners like `[::]:<port>` are not dropped) → parse the LISTENING line for `:<port>` → last column is PID. Resolve name via `tasklist /FI "PID eq <pid>" /FO CSV /NH`. Kill via `taskkill /PID <pid> /F /T`.
+- **macOS/Linux:** prefer `lsof -nP -iTCP -sTCP:LISTEN` for PIDs (a single batched scan covers a whole range); get details from `ps -p <pid> -o comm=,args=`. Kill via `process.kill(pid, 'SIGTERM')`, escalate to `SIGKILL` after a short timeout. Fall back to `fuser`, then iproute2's `ss`, if `lsof` is missing.
+- Wrap all spawns with a helper that returns `{stdout, code}` and never throws on non-zero, and applies a per-command timeout.
 
 ## 7. Architecture & file layout
 ```

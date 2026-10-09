@@ -1,13 +1,12 @@
 #!/usr/bin/env node
 // portkill — find and kill whatever process is hogging a TCP port, on any OS.
+// Thin shim: resolve the version and hand off to src/cli.mjs (kept separate so
+// the orchestration is unit-testable with injected dependencies).
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-import { parseArgs, HELP } from '../src/args.mjs';
-import { findProcessesOnPorts } from '../src/find.mjs';
-import { killProcess, isProtectedPid } from '../src/kill.mjs';
-import { makeStyler, colorEnabled, confirm, formatTable } from '../src/ui.mjs';
+import { run } from '../src/cli.mjs';
 
 function getVersion() {
   try {
@@ -19,141 +18,7 @@ function getVersion() {
   }
 }
 
-async function main(argv) {
-  const opts = parseArgs(argv);
-  const c = makeStyler(colorEnabled());
-
-  if (opts.help) {
-    process.stdout.write(HELP);
-    return 0;
-  }
-  if (opts.version) {
-    process.stdout.write(`portkill ${getVersion()}\n`);
-    return 0;
-  }
-  if (opts.errors.length) {
-    for (const e of opts.errors) process.stderr.write(`${c.red('error:')} ${e}\n`);
-    process.stderr.write(`\nRun ${c.cyan('portkill --help')} for usage.\n`);
-    return 2;
-  }
-  if (opts.ports.length === 0) {
-    process.stderr.write(`${c.red('error:')} specify at least one port\n`);
-    process.stderr.write(`\nRun ${c.cyan('portkill --help')} for usage.\n`);
-    return 2;
-  }
-
-  // 1. Discover everything listening on the requested ports. A single batched
-  //    scan is used so a range (e.g. 3000-3050) does not spawn one netstat per
-  //    port.
-  let found = [];
-  try {
-    found = await findProcessesOnPorts(opts.ports);
-  } catch (err) {
-    process.stderr.write(`${c.red('error:')} scanning ports: ${err.message || err}\n`);
-    found = [];
-  }
-  const busyPorts = new Set(found.map((p) => p.port));
-  if (!opts.json) {
-    for (const port of opts.ports) {
-      if (!busyPorts.has(port)) {
-        process.stdout.write(`${c.dim('\u00b7')} port ${c.bold(String(port))} is free \u2014 nothing is listening\n`);
-      }
-    }
-  }
-
-  // Protect system-critical PIDs, portkill itself, and the parent shell: if the
-  // terminal that launched portkill owns the listening port, killing it would
-  // make the user's shell window vanish mid-command.
-  const isProtected = (p) =>
-    isProtectedPid(p.pid) || p.pid === process.pid || p.pid === process.ppid;
-
-  const buildJson = (success, killed, skipped) =>
-    JSON.stringify(
-      { success, ports: opts.ports, found, killed, skipped },
-      null,
-      2,
-    );
-
-  // 2. --list never kills.
-  if (opts.list) {
-    if (opts.json) process.stdout.write(`${buildJson(true, [], [])}\n`);
-    else if (found.length) process.stdout.write(`${formatTable(found, c)}\n`);
-    return 0;
-  }
-
-  if (found.length === 0) {
-    if (opts.json) process.stdout.write(`${buildJson(true, [], [])}\n`);
-    return 0;
-  }
-
-  const skipped = found.filter(isProtected);
-  // Deduplicate kill targets by PID: one process can listen on several of the
-  // requested ports, which would otherwise make us run taskkill/kill against
-  // the same (now-dead) PID multiple times and count false failures.
-  const seenPid = new Set();
-  const killable = found
-    .filter((p) => !isProtected(p))
-    .filter((p) => {
-      if (seenPid.has(p.pid)) return false;
-      seenPid.add(p.pid);
-      return true;
-    });
-
-  // 3. JSON without --force is a read-only listing (no destructive prompt in machine mode).
-  if (opts.json && !opts.force) {
-    process.stdout.write(`${buildJson(true, [], skipped)}\n`);
-    return 0;
-  }
-
-  // 4. Human, interactive path: show, warn about protected, confirm.
-  if (!opts.json) {
-    process.stdout.write(`${formatTable(found, c)}\n`);
-    for (const p of skipped) {
-      process.stdout.write(`${c.yellow(`  \u26a0 skipping PID ${p.pid} (${p.name}) \u2014 protected process`)}\n`);
-    }
-    if (killable.length === 0) {
-      process.stdout.write(`${c.yellow('nothing to kill \u2014 all matches are protected.')}\n`);
-      return 0;
-    }
-    if (!opts.force) {
-      if (!process.stdin.isTTY) {
-        process.stderr.write(`${c.red('error:')} refusing to kill without confirmation (no interactive terminal).\n`);
-        process.stderr.write(`Re-run with ${c.cyan('--force')} to skip the prompt.\n`);
-        return 2;
-      }
-      const noun = killable.length === 1 ? 'process' : 'processes';
-      const ok = await confirm(`Kill ${c.bold(String(killable.length))} ${noun}?`);
-      if (!ok) {
-        process.stdout.write('aborted.\n');
-        return 0;
-      }
-    }
-  }
-
-  // 5. Kill.
-  const results = [];
-  let failures = 0;
-  for (const t of killable) {
-    const r = await killProcess(t.pid);
-    results.push({ ...t, killed: r.ok, error: r.error || null });
-    if (!r.ok) failures += 1;
-    if (!opts.json) {
-      if (r.ok) {
-        process.stdout.write(`${c.green(`  \u2713 killed PID ${t.pid} (${t.name})`)} \u2014 port ${t.port} freed\n`);
-      } else {
-        process.stderr.write(`${c.red(`  \u2717 PID ${t.pid} (${t.name}):`)} ${r.error}\n`);
-      }
-    }
-  }
-
-  if (opts.json) {
-    process.stdout.write(`${buildJson(failures === 0, results, skipped)}\n`);
-  }
-
-  return failures > 0 ? 1 : 0;
-}
-
-main(process.argv.slice(2))
+run(process.argv.slice(2), { version: getVersion() })
   .then((code) => process.exit(code))
   .catch((err) => {
     process.stderr.write(`unexpected error: ${err && err.stack ? err.stack : err}\n`);
