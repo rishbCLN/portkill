@@ -82,3 +82,26 @@ test('killProcess win32: taskkill failure surfaces stderr', async () => {
   assert.equal(r.ok, false);
   assert.match(r.error, /access is denied/i);
 });
+
+// When one process listens on several requested ports it is killed once per
+// port; after the first kill the process is gone, so later taskkill calls report
+// "not found" / "no running instance". That must count as success, otherwise
+// portkill exits non-zero even though everything was terminated.
+test('killProcess win32: "process not found" is treated as already gone (ok)', async () => {
+  const run = async () => ({
+    code: 128, stdout: '', stderr: 'ERROR: The process "1234" not found.',
+  });
+  const r = await killProcess(1234, { platform: 'win32', run });
+  assert.equal(r.ok, true);
+  assert.equal(r.alreadyGone, true);
+});
+
+test('killProcess win32: "no running instance" is treated as already gone (ok)', async () => {
+  const run = async () => ({
+    code: 128, stdout: '',
+    stderr: 'ERROR: The process with PID 1234 could not be terminated.\nReason: There is no running instance of the task.',
+  });
+  const r = await killProcess(1234, { platform: 'win32', run });
+  assert.equal(r.ok, true);
+  assert.equal(r.alreadyGone, true);
+});

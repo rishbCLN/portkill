@@ -4,9 +4,11 @@ import {
   parseNetstat,
   parseLsofPids,
   parseFuser,
+  parseSs,
   parsePsOutput,
   parseTasklistName,
   findProcessesOnPort,
+  findProcessesOnPorts,
 } from '../src/find.mjs';
 
 const NETSTAT = `
@@ -74,6 +76,17 @@ test('parseLsofPids: empty input', () => {
 
 test('parseFuser: extracts pids and drops the port', () => {
   assert.deepEqual(parseFuser('3000/tcp:            48213 48990\n', 3000), [48213, 48990]);
+});
+
+const SS_OUT = `LISTEN 0 128 0.0.0.0:3000 0.0.0.0:* users:(("node",pid=48213,fd=20))
+LISTEN 0 128 [::]:3000 [::]:* users:(("node",pid=48213,fd=21))`;
+
+test('parseSs: extracts pids from the users:(...) field, deduped', () => {
+  assert.deepEqual(parseSs(SS_OUT), [48213]);
+});
+
+test('parseSs: empty input', () => {
+  assert.deepEqual(parseSs(''), []);
 });
 
 test('parsePsOutput: splits name from the full command line', () => {
@@ -166,4 +179,77 @@ test('findProcessesOnPort: does not filter to IPv4 (finds IPv6 listeners)', asyn
   assert.ok(!(netstatArgs.includes('-p') && netstatArgs.includes('tcp')),
     'netstat must not be restricted to a single family');
   assert.deepEqual(res, [{ pid: 55123, name: 'node.exe', cmd: '' }]);
+});
+
+// Minimal Linux images (Alpine/Debian containers) ship neither lsof nor fuser,
+// only iproute2's `ss`. findProcessesOnPort must fall through lsof -> fuser ->
+// ss, with each fallback firing only when the previous probe is not installed.
+test('findProcessesOnPort: falls back to ss when lsof and fuser are both missing', async () => {
+  const enoent = (name) => ({
+    code: -1, stdout: '', stderr: '',
+    error: Object.assign(new Error(`spawn ${name} ENOENT`), { code: 'ENOENT' }),
+  });
+  const run = async (cmd) => {
+    if (cmd === 'lsof') return enoent('lsof');
+    if (cmd === 'fuser') return enoent('fuser');
+    if (cmd === 'ss') {
+      return { code: 0, stdout: 'LISTEN 0 128 0.0.0.0:3000 0.0.0.0:* users:(("node",pid=48213,fd=20))', stderr: '' };
+    }
+    if (cmd === 'ps') return { code: 0, stdout: 'node node /srv/app.js', stderr: '' };
+    return { code: 1, stdout: '', stderr: '' };
+  };
+  const res = await findProcessesOnPort(3000, { platform: 'linux', run });
+  assert.deepEqual(res, [{ pid: 48213, name: 'node', cmd: 'node /srv/app.js' }]);
+});
+
+// Regression: scanning a range used to spawn one netstat per port. The batched
+// scan must call netstat exactly once and still attribute PIDs to the right
+// ports, and query tasklist once per distinct PID.
+test('findProcessesOnPorts: windows batches a single netstat for many ports', async () => {
+  const NETSTAT_MULTI = `
+Active Connections
+
+  Proto  Local Address          Foreign Address        State           PID
+  TCP    0.0.0.0:3000           0.0.0.0:0              LISTENING       48213
+  TCP    0.0.0.0:8080           0.0.0.0:0              LISTENING       777
+`;
+  let netstatCalls = 0;
+  let tasklistCalls = 0;
+  const run = async (cmd) => {
+    if (cmd === 'netstat') { netstatCalls += 1; return { code: 0, stdout: NETSTAT_MULTI, stderr: '' }; }
+    if (cmd === 'tasklist') {
+      tasklistCalls += 1;
+      return { code: 0, stdout: '"node.exe","0","Console","1","10 K"', stderr: '' };
+    }
+    return { code: 1, stdout: '', stderr: '' };
+  };
+  const res = await findProcessesOnPorts([3000, 8080, 9999], { platform: 'win32', run });
+  assert.equal(netstatCalls, 1, 'netstat must be invoked exactly once for the batch');
+  assert.equal(tasklistCalls, 2, 'tasklist once per distinct PID');
+  assert.deepEqual(res, [
+    { port: 3000, pid: 48213, name: 'node.exe', cmd: '' },
+    { port: 8080, pid: 777, name: 'node.exe', cmd: '' },
+  ]);
+});
+
+test('findProcessesOnPorts: one process on several ports is queried via tasklist once', async () => {
+  const NETSTAT_SHARED = `
+Active Connections
+
+  Proto  Local Address          Foreign Address        State           PID
+  TCP    0.0.0.0:3000           0.0.0.0:0              LISTENING       48213
+  TCP    0.0.0.0:3001           0.0.0.0:0              LISTENING       48213
+`;
+  let tasklistCalls = 0;
+  const run = async (cmd) => {
+    if (cmd === 'netstat') return { code: 0, stdout: NETSTAT_SHARED, stderr: '' };
+    if (cmd === 'tasklist') { tasklistCalls += 1; return { code: 0, stdout: '"node.exe","48213","Console","1","10 K"', stderr: '' }; }
+    return { code: 1, stdout: '', stderr: '' };
+  };
+  const res = await findProcessesOnPorts([3000, 3001], { platform: 'win32', run });
+  assert.equal(tasklistCalls, 1);
+  assert.deepEqual(res, [
+    { port: 3000, pid: 48213, name: 'node.exe', cmd: '' },
+    { port: 3001, pid: 48213, name: 'node.exe', cmd: '' },
+  ]);
 });

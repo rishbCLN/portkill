@@ -67,6 +67,22 @@ export function parseFuser(text, port) {
 }
 
 /**
+ * Parse `ss -lptnH 'sport = :<port>'` output. ss embeds the owning pid in a
+ * `users:(("name",pid=1234,fd=20))` field; we extract every `pid=<n>`.
+ * This is the only listener probe available on minimal Linux images
+ * (Alpine/Debian containers) that ship neither lsof nor fuser.
+ * @returns {number[]} unique PIDs
+ */
+export function parseSs(stdout) {
+  const pids = new Set();
+  for (const m of String(stdout).matchAll(/pid=(\d+)/g)) {
+    const n = Number(m[1]);
+    if (Number.isInteger(n) && n > 0) pids.add(n);
+  }
+  return [...pids];
+}
+
+/**
  * Parse `ps -p <pid> -o comm=,args=` output into a name + full command line.
  * @returns {{ name: string, cmd: string }}
  */
@@ -86,6 +102,35 @@ export function parseTasklistName(stdout) {
   const first = String(stdout).trim().split(/\r?\n/)[0] || '';
   const m = first.match(/^"([^"]*)"/);
   return m ? m[1] : '';
+}
+
+/**
+ * Resolve a Windows image name for a PID via tasklist.
+ */
+async function tasklistName(pid, run) {
+  const { stdout: tl } = await run('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH']);
+  return parseTasklistName(tl) || 'unknown';
+}
+
+/**
+ * Discover listener PIDs on a single POSIX port, trying lsof, then fuser, then
+ * ss. Each fallback only fires when the previous probe is not installed
+ * (ENOENT), so minimal containers that ship only `ss` still work.
+ * @returns {Promise<number[]>}
+ */
+async function posixPidsOnPort(port, run) {
+  const res = await run('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t']);
+  let pids = parseLsofPids(res.stdout);
+  if (pids.length === 0 && res.error && res.error.code === 'ENOENT') {
+    const f = await run('fuser', [`${port}/tcp`]);
+    pids = parseFuser(`${f.stdout}\n${f.stderr}`, port);
+    if (pids.length === 0 && f.error && f.error.code === 'ENOENT') {
+      // Minimal Linux (Alpine/Debian): only iproute2's `ss` is present.
+      const s = await run('ss', ['-lptnH', `sport = :${port}`]);
+      pids = parseSs(`${s.stdout}\n${s.stderr}`);
+    }
+  }
+  return pids;
 }
 
 /**
@@ -109,25 +154,56 @@ export async function findProcessesOnPort(port, opts = {}) {
     const pids = parseNetstat(stdout, port);
     const out = [];
     for (const pid of pids) {
-      const { stdout: tl } = await run('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH']);
-      out.push({ pid, name: parseTasklistName(tl) || 'unknown', cmd: '' });
+      out.push({ pid, name: await tasklistName(pid, run), cmd: '' });
     }
     return out;
   }
 
-  // POSIX (macOS / Linux): prefer lsof, fall back to fuser if it isn't installed.
-  const res = await run('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t']);
-  let pids = parseLsofPids(res.stdout);
-  if (pids.length === 0 && res.error && res.error.code === 'ENOENT') {
-    const f = await run('fuser', [`${port}/tcp`]);
-    pids = parseFuser(`${f.stdout}\n${f.stderr}`, port);
-  }
-
+  // POSIX (macOS / Linux): prefer lsof, fall back to fuser, then ss.
+  const pids = await posixPidsOnPort(port, run);
   const out = [];
   for (const pid of pids) {
     const ps = await run('ps', ['-p', String(pid), '-o', 'comm=,args=']);
     const { name, cmd } = parsePsOutput(ps.stdout);
     out.push({ pid, name: name || 'unknown', cmd });
+  }
+  return out;
+}
+
+/**
+ * Find all processes listening on ANY of the requested TCP ports.
+ *
+ * On Windows this runs a single `netstat -ano` snapshot and matches every port
+ * against it, instead of spawning one netstat per port (scanning a range like
+ * 3000-3050 previously spawned 51 processes). tasklist is still queried once
+ * per distinct PID. The POSIX path probes per port (lsof/fuser/ss filter by
+ * port) but reuses one code path.
+ *
+ * @param {number[]} ports
+ * @param {{ platform?: NodeJS.Platform, run?: typeof defaultRun }} [opts]
+ * @returns {Promise<Array<{ port: number, pid: number, name: string, cmd: string }>>}
+ */
+export async function findProcessesOnPorts(ports, opts = {}) {
+  const platform = opts.platform || process.platform;
+  const run = opts.run || defaultRun;
+  const portList = [...new Set(ports)];
+  const out = [];
+
+  if (platform === 'win32') {
+    const { stdout } = await run('netstat', ['-ano']);
+    const names = new Map(); // pid -> name (one tasklist call per PID)
+    for (const port of portList) {
+      for (const pid of parseNetstat(stdout, port)) {
+        if (!names.has(pid)) names.set(pid, await tasklistName(pid, run));
+        out.push({ port, pid, name: names.get(pid), cmd: '' });
+      }
+    }
+    return out;
+  }
+
+  for (const port of portList) {
+    const procs = await findProcessesOnPort(port, { platform, run });
+    for (const p of procs) out.push({ port, pid: p.pid, name: p.name, cmd: p.cmd });
   }
   return out;
 }

@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 import { parseArgs, HELP } from '../src/args.mjs';
-import { findProcessesOnPort } from '../src/find.mjs';
+import { findProcessesOnPorts } from '../src/find.mjs';
 import { killProcess, isProtectedPid } from '../src/kill.mjs';
 import { makeStyler, colorEnabled, confirm, formatTable } from '../src/ui.mjs';
 
@@ -42,45 +42,66 @@ async function main(argv) {
     return 2;
   }
 
-  // 1. Discover everything listening on the requested ports.
-  const found = [];
-  for (const port of opts.ports) {
-    let procs;
-    try {
-      procs = await findProcessesOnPort(port);
-    } catch (err) {
-      process.stderr.write(`${c.red('error:')} scanning port ${port}: ${err.message || err}\n`);
-      continue;
-    }
-    if (procs.length === 0) {
-      if (!opts.json) {
+  // 1. Discover everything listening on the requested ports. A single batched
+  //    scan is used so a range (e.g. 3000-3050) does not spawn one netstat per
+  //    port.
+  let found = [];
+  try {
+    found = await findProcessesOnPorts(opts.ports);
+  } catch (err) {
+    process.stderr.write(`${c.red('error:')} scanning ports: ${err.message || err}\n`);
+    found = [];
+  }
+  const busyPorts = new Set(found.map((p) => p.port));
+  if (!opts.json) {
+    for (const port of opts.ports) {
+      if (!busyPorts.has(port)) {
         process.stdout.write(`${c.dim('\u00b7')} port ${c.bold(String(port))} is free \u2014 nothing is listening\n`);
       }
-      continue;
     }
-    for (const p of procs) found.push({ port, pid: p.pid, name: p.name, cmd: p.cmd });
   }
 
-  const isProtected = (p) => isProtectedPid(p.pid) || p.pid === process.pid;
+  // Protect system-critical PIDs, portkill itself, and the parent shell: if the
+  // terminal that launched portkill owns the listening port, killing it would
+  // make the user's shell window vanish mid-command.
+  const isProtected = (p) =>
+    isProtectedPid(p.pid) || p.pid === process.pid || p.pid === process.ppid;
+
+  const buildJson = (success, killed, skipped) =>
+    JSON.stringify(
+      { success, ports: opts.ports, found, killed, skipped },
+      null,
+      2,
+    );
 
   // 2. --list never kills.
   if (opts.list) {
-    if (opts.json) process.stdout.write(`${JSON.stringify(found, null, 2)}\n`);
+    if (opts.json) process.stdout.write(`${buildJson(true, [], [])}\n`);
     else if (found.length) process.stdout.write(`${formatTable(found, c)}\n`);
     return 0;
   }
 
   if (found.length === 0) {
-    if (opts.json) process.stdout.write('[]\n');
+    if (opts.json) process.stdout.write(`${buildJson(true, [], [])}\n`);
     return 0;
   }
 
-  const killable = found.filter((p) => !isProtected(p));
   const skipped = found.filter(isProtected);
+  // Deduplicate kill targets by PID: one process can listen on several of the
+  // requested ports, which would otherwise make us run taskkill/kill against
+  // the same (now-dead) PID multiple times and count false failures.
+  const seenPid = new Set();
+  const killable = found
+    .filter((p) => !isProtected(p))
+    .filter((p) => {
+      if (seenPid.has(p.pid)) return false;
+      seenPid.add(p.pid);
+      return true;
+    });
 
   // 3. JSON without --force is a read-only listing (no destructive prompt in machine mode).
   if (opts.json && !opts.force) {
-    process.stdout.write(`${JSON.stringify(found, null, 2)}\n`);
+    process.stdout.write(`${buildJson(true, [], skipped)}\n`);
     return 0;
   }
 
@@ -126,7 +147,7 @@ async function main(argv) {
   }
 
   if (opts.json) {
-    process.stdout.write(`${JSON.stringify({ killed: results, skipped }, null, 2)}\n`);
+    process.stdout.write(`${buildJson(failures === 0, results, skipped)}\n`);
   }
 
   return failures > 0 ? 1 : 0;

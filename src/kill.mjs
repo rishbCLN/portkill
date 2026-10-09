@@ -47,8 +47,17 @@ export async function killProcess(pid, opts = {}) {
 
   if (platform === 'win32') {
     // /T also terminates child processes; /F forces it.
-    const { code, stderr, error } = await run('taskkill', ['/PID', String(pid), '/F', '/T']);
+    const { code, stdout, stderr, error } = await run('taskkill', ['/PID', String(pid), '/F', '/T']);
     if (code === 0) return { pid, ok: true };
+    // A process that is already gone is success, not failure. When one process
+    // listens on several requested ports it is targeted once per port; the
+    // first taskkill removes it and later calls report "not found" / "no
+    // running instance". Treating that as a failure would make portkill exit
+    // non-zero even though every process was terminated.
+    const text = `${stdout || ''} ${stderr || ''}`;
+    if (/not found|no running instance|could not be found/i.test(text)) {
+      return { pid, ok: true, alreadyGone: true };
+    }
     const msg = (stderr || (error && error.message) || `taskkill exited with code ${code}`).trim();
     return { pid, ok: false, error: msg };
   }
